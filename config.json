@@ -1,0 +1,22 @@
+{
+  "repositories": [
+    {
+      "name": "example-project",
+      "path": "C:/Users/YOURNAME/projects/example-project",
+      "exclude_patterns": ["*.log", "node_modules/", ".env"]
+    },
+    {
+      "name": "another-project",
+      "path": "/home/yourname/projects/another-project",
+      "schedule": { "type": "interval", "hours": 0, "minutes": 15 }
+    }
+  ],
+  "schedule": {
+    "type": "cron",
+    "hour": 18,
+    "minute": 0
+  },
+  "commit_message_template": "Automated check-in: {name} at {timestamp}",
+  "log_file": "auto_checkin.log",
+  "protected_branches": ["main", "master", "develop"]
+}
