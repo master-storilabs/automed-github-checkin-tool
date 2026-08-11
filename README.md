@@ -249,3 +249,5 @@ or `develop`, so it only acts on feature/working branches unless you
 explicitly reconfigure it. Squash or rebase before merging if you want a
 clean history upstream. Remember: this tool never pushes, so noisy local
 commits stay local until you decide otherwise.
+
+<!-- branch-guard test note -->
