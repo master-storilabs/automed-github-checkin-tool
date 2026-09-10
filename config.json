@@ -18,5 +18,10 @@
   },
   "commit_message_template": "Automated check-in: {name} at {timestamp}",
   "log_file": "auto_checkin.log",
-  "protected_branches": ["main", "master", "develop"]
+  "protected_branches": ["main", "master", "develop"],
+  "push": {
+    "enabled": false,
+    "remote": "origin",
+    "branch_prefix": "wip/yourname/"
+  }
 }
