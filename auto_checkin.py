@@ -19,6 +19,8 @@ Usage:
 import argparse
 import json
 import logging
+import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -55,6 +57,29 @@ def validate_schedule(schedule, context: str) -> None:
             )
 
 
+def validate_push(push, context: str) -> None:
+    """Validate a 'push' object (used for both the global and per-repo push config).
+
+    When 'enabled' is true the tool force-pushes each auto-commit to a
+    per-developer work-in-progress branch so the work has an off-machine copy
+    on the remote. 'branch_prefix' namespaces that branch (e.g. "wip/fidha/")
+    so shared/feature branches are never touched.
+    """
+    if not isinstance(push, dict):
+        raise ConfigError(f"{context} must be an object.")
+    if not push.get("enabled"):
+        return
+    prefix = push.get("branch_prefix")
+    if not isinstance(prefix, str) or not prefix.strip():
+        raise ConfigError(
+            f"{context}: 'branch_prefix' is required (e.g. \"wip/yourname/\") "
+            "when push is enabled."
+        )
+    remote = push.get("remote", "origin")
+    if not isinstance(remote, str) or not remote.strip():
+        raise ConfigError(f"{context}: 'remote' must be a non-empty string.")
+
+
 def load_config(config_path: Path) -> dict:
     """Load and minimally validate the JSON config file."""
     if not config_path.is_file():
@@ -81,8 +106,14 @@ def load_config(config_path: Path) -> dict:
             validate_schedule(
                 repo["schedule"], f"repositories[{i}] ('{repo['name']}') schedule"
             )
+        if "push" in repo:
+            validate_push(
+                repo["push"], f"repositories[{i}] ('{repo['name']}') push"
+            )
 
     validate_schedule(config.get("schedule"), "Top-level 'schedule'")
+    if "push" in config:
+        validate_push(config["push"], "Top-level 'push'")
 
     config.setdefault(
         "commit_message_template", "Automated check-in: {name} at {timestamp}"
@@ -92,6 +123,8 @@ def load_config(config_path: Path) -> dict:
     # commits are skipped on these shared branches unless a repo overrides
     # the list explicitly.
     config.setdefault("protected_branches", ["main", "master", "develop"])
+    # Off by default: the tool commits locally only unless push is enabled.
+    config.setdefault("push", {"enabled": False})
 
     return config
 
@@ -131,12 +164,18 @@ def setup_logging(log_file: str) -> logging.Logger:
 # ---------------------------------------------------------------------------
 
 def run_git(args: list, cwd: Path) -> subprocess.CompletedProcess:
-    """Run a git command in the given working directory and return the result."""
+    """Run a git command in the given working directory and return the result.
+
+    GIT_TERMINAL_PROMPT=0 ensures a git operation that would otherwise block on
+    an interactive credential/passphrase prompt (e.g. `git push` with no cached
+    auth) fails fast instead of hanging the unattended scheduler.
+    """
     return subprocess.run(
         ["git", *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
 
 
@@ -209,6 +248,59 @@ def commit_changes(repo_path: Path, message: str) -> None:
         raise RuntimeError(f"git commit failed: {result.stderr.strip()}")
 
 
+def head_matches_remote_branch(repo_path: Path, remote: str, target_branch: str) -> bool:
+    """True if the remote already has this exact commit at target_branch (nothing to push)."""
+    local = run_git(["rev-parse", "HEAD"], cwd=repo_path)
+    remote_ref = run_git(
+        ["ls-remote", "--heads", remote, target_branch], cwd=repo_path
+    )
+    if local.returncode != 0 or remote_ref.returncode != 0:
+        return False
+    remote_sha = remote_ref.stdout.split("\t")[0].strip() if remote_ref.stdout else ""
+    return bool(remote_sha) and remote_sha == local.stdout.strip()
+
+
+def push_wip_branch(
+    repo_path: Path, remote: str, target_branch: str, logger: logging.Logger, name: str
+) -> str:
+    """Force-push (with lease) the current HEAD to a per-developer WIP branch.
+
+    This is what makes an auto check-in survive a disk failure: the commit is
+    mirrored to `<remote>/<target_branch>`, an isolated namespace that never
+    touches shared or real feature branches.
+
+    Non-fatal by design -- the local commit is already on disk, so a failed
+    push (offline, missing credentials, someone else advanced the branch) is
+    logged and simply retried on the next scheduled run.
+
+    Returns one of: "pushed", "up to date", "push failed".
+    """
+    if head_matches_remote_branch(repo_path, remote, target_branch):
+        logger.info(f"[{name}] {remote}/{target_branch} already up to date -> up to date")
+        return "up to date"
+
+    refspec = f"HEAD:refs/heads/{target_branch}"
+    result = run_git(
+        ["push", "--force-with-lease", remote, refspec], cwd=repo_path
+    )
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip()).replace("\n", " ")
+        logger.error(f"[{name}] push to {remote}/{target_branch} failed: {detail} -> push failed")
+        return "push failed"
+    logger.info(f"[{name}] Mirrored HEAD to {remote}/{target_branch} -> pushed")
+    return "pushed"
+
+
+def resolve_push_config(repo_config: dict, default_push: dict) -> dict:
+    """Return the effective push config for a repo (own 'push' override, else the default)."""
+    return repo_config.get("push", default_push) or {"enabled": False}
+
+
+def wip_branch_name(prefix: str, branch: str) -> str:
+    """Join the configured WIP prefix and the current branch into a valid ref name."""
+    return re.sub(r"/{2,}", "/", f"{prefix.rstrip('/')}/{branch}")
+
+
 # ---------------------------------------------------------------------------
 # Core check-in logic
 # ---------------------------------------------------------------------------
@@ -217,11 +309,15 @@ def process_repository(
     repo_config: dict,
     commit_message_template: str,
     default_protected_branches: list,
+    default_push: dict,
     logger: logging.Logger,
-) -> str:
-    """Process a single repository: stage and commit pending changes if any.
+) -> tuple:
+    """Process a single repository: stage and commit pending changes, then
+    (if push is enabled) mirror HEAD to a per-developer WIP branch.
 
-    Returns one of: "committed", "no changes", "skipped", "error", "not a repo".
+    Returns a (commit_outcome, push_outcome) tuple.
+    commit_outcome: "committed", "no changes", "skipped", "error", "not a repo".
+    push_outcome:   None (not attempted), "pushed", "up to date", "push failed".
     """
     name = repo_config["name"]
     path = Path(repo_config["path"]).expanduser()
@@ -230,14 +326,15 @@ def process_repository(
         b.lower()
         for b in repo_config.get("protected_branches", default_protected_branches)
     }
+    push_config = resolve_push_config(repo_config, default_push)
 
     if not path.exists():
         logger.error(f"[{name}] Path does not exist: {path} -> not a repo")
-        return "not a repo"
+        return "not a repo", None
 
     if not is_git_repo(path):
         logger.error(f"[{name}] No .git directory found at: {path} -> not a repo")
-        return "not a repo"
+        return "not a repo", None
 
     try:
         branch = get_current_branch(path)
@@ -245,40 +342,50 @@ def process_repository(
             logger.info(
                 f"[{name}] Detached HEAD state, refusing to auto-commit -> skipped"
             )
-            return "skipped"
+            return "skipped", None
         if branch.lower() in protected_branches:
             logger.info(
                 f"[{name}] On protected branch '{branch}', auto check-in only runs "
                 "on feature/developer branches -> skipped"
             )
-            return "skipped"
+            return "skipped", None
 
         status_output = get_status_porcelain(path)
         if not status_output.strip():
             logger.info(f"[{name}] No changes detected -> no changes")
-            return "no changes"
+            outcome = "no changes"
+        else:
+            stage_changes(path, exclude_patterns)
+            if not has_staged_changes(path):
+                # Everything that changed was excluded by exclude_patterns.
+                logger.info(
+                    f"[{name}] Changes present but all excluded by exclude_patterns -> no changes"
+                )
+                outcome = "no changes"
+            else:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                message = commit_message_template.format(timestamp=timestamp, name=name)
+                commit_changes(path, message)
+                logger.info(f"[{name}] Committed pending changes -> committed")
+                outcome = "committed"
 
-        stage_changes(path, exclude_patterns)
+        # Mirror HEAD to the WIP branch even when nothing was committed this
+        # pass -- the dev may have unpushed local commits of their own, and
+        # the whole point is that nothing on this disk is irreplaceable.
+        push_outcome = None
+        if push_config.get("enabled"):
+            remote = push_config.get("remote", "origin")
+            target = wip_branch_name(push_config["branch_prefix"], branch)
+            push_outcome = push_wip_branch(path, remote, target, logger, name)
 
-        if not has_staged_changes(path):
-            # Everything that changed was excluded by exclude_patterns.
-            logger.info(
-                f"[{name}] Changes present but all excluded by exclude_patterns -> no changes"
-            )
-            return "no changes"
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        message = commit_message_template.format(timestamp=timestamp, name=name)
-        commit_changes(path, message)
-        logger.info(f"[{name}] Committed pending changes -> committed")
-        return "committed"
+        return outcome, push_outcome
 
     except RuntimeError as exc:
         logger.error(f"[{name}] {exc} -> error")
-        return "error"
+        return "error", None
     except Exception as exc:  # unexpected failure; still log and continue
         logger.error(f"[{name}] Unexpected error: {exc} -> error")
-        return "error"
+        return "error", None
 
 
 def run_checkin_pass(config: dict, logger: logging.Logger, repos: list = None) -> dict:
@@ -294,24 +401,37 @@ def run_checkin_pass(config: dict, logger: logging.Logger, repos: list = None) -
         "error": 0,
         "not a repo": 0,
     }
+    push_results = {"pushed": 0, "up to date": 0, "push failed": 0}
 
     for repo_config in repos:
-        outcome = process_repository(
+        outcome, push_outcome = process_repository(
             repo_config,
             config["commit_message_template"],
             config["protected_branches"],
+            config["push"],
             logger,
         )
         results[outcome] += 1
+        if push_outcome is not None:
+            push_results[push_outcome] += 1
 
+    push_summary = ""
+    if any(push_results.values()):
+        push_summary = (
+            f"; push: {push_results['pushed']} pushed, "
+            f"{push_results['up to date']} up to date, "
+            f"{push_results['push failed']} failed"
+        )
     logger.info(
         "=== Check-in pass complete: "
         f"{results['committed']} committed, "
         f"{results['no changes']} no changes, "
         f"{results['skipped']} skipped (protected branch), "
         f"{results['error']} errors, "
-        f"{results['not a repo']} not a repo ==="
+        f"{results['not a repo']} not a repo"
+        f"{push_summary} ==="
     )
+    results["push"] = push_results
     return results
 
 
