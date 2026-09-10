@@ -12,9 +12,9 @@
     }
   ],
   "schedule": {
-    "type": "cron",
-    "hour": 18,
-    "minute": 0
+    "type": "interval",
+    "hours": 0,
+    "minutes": 30
   },
   "commit_message_template": "Automated check-in: {name} at {timestamp}",
   "log_file": "auto_checkin.log",

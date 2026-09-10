@@ -44,13 +44,13 @@ By default the tool looks for `config.json` next to `auto_checkin.py`. Use
     {
       "name": "another-project",
       "path": "/home/you/projects/another-project",
-      "schedule": { "type": "interval", "hours": 0, "minutes": 15 }
+      "schedule": { "type": "cron", "hour": 18, "minute": 0 }
     }
   ],
   "schedule": {
-    "type": "cron",
-    "hour": 18,
-    "minute": 0
+    "type": "interval",
+    "hours": 0,
+    "minutes": 30
   },
   "commit_message_template": "Automated check-in: {name} at {timestamp}",
   "log_file": "auto_checkin.log",
@@ -73,7 +73,7 @@ One entry per local git repository to watch:
 
 Per-repo `schedule` is useful on a shared team config where different
 projects warrant different cadences — e.g. a fast-moving repo checked in
-every 15 minutes, while quieter repos stick to the once-daily default:
+every 15 minutes, while quieter repos stay on the default interval:
 
 ```json
 {
@@ -91,20 +91,22 @@ scheduled job — so repos on different cadences never wait on each other.
 ### `schedule` (object, required)
 
 The default schedule for any repo that doesn't define its own override.
-Either a fixed daily time or a recurring interval:
+Either a recurring interval or a fixed daily time:
+
+**Recurring interval (recommended):**
+```json
+{ "type": "interval", "hours": 0, "minutes": 30 }
+```
+Runs repeatedly every `hours`/`minutes` (both optional, but at least one must
+be non-zero), starting one interval after the scheduler is launched. A short
+interval keeps the off-machine backup close to your latest work — a
+once-a-day run can still lose most of a day if the disk fails at 5pm.
 
 **Fixed daily time:**
 ```json
 { "type": "cron", "hour": 18, "minute": 0 }
 ```
 Runs once a day at the given hour/minute (24-hour, local time).
-
-**Recurring interval:**
-```json
-{ "type": "interval", "hours": 1, "minutes": 30 }
-```
-Runs repeatedly every `hours`/`minutes` (both optional, but at least one must
-be non-zero), starting one interval after the scheduler is launched.
 
 ### `commit_message_template` (string, optional)
 
