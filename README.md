@@ -4,8 +4,12 @@ A small, cross-platform Python tool that watches a list of local git
 repositories and, on a schedule, automatically **commits** any pending local
 changes (staged, unstaged, or untracked files) in each of them.
 
-**This tool only commits. It never runs `git push`.** Pushing remains a
-manual, deliberate action you take yourself.
+**By default this tool only commits — it does not push.** Your normal
+push of a feature branch stays a manual, deliberate action. Optionally,
+you can enable **auto-push to a per-developer work-in-progress branch**
+(`wip/<name>/<branch>`) so that a disk failure can't lose committed work
+— see [`push`](#push-object-optional) below. It never pushes to the real
+feature branch.
 
 **By default, it only auto-commits on feature/developer branches.** It
 refuses to commit while `main`, `master`, or `develop` is checked out (or the
@@ -40,17 +44,18 @@ By default the tool looks for `config.json` next to `auto_checkin.py`. Use
     {
       "name": "another-project",
       "path": "/home/you/projects/another-project",
-      "schedule": { "type": "interval", "hours": 0, "minutes": 15 }
+      "schedule": { "type": "cron", "hour": 18, "minute": 0 }
     }
   ],
   "schedule": {
-    "type": "cron",
-    "hour": 18,
-    "minute": 0
+    "type": "interval",
+    "hours": 0,
+    "minutes": 30
   },
   "commit_message_template": "Automated check-in: {name} at {timestamp}",
   "log_file": "auto_checkin.log",
-  "protected_branches": ["main", "master", "develop"]
+  "protected_branches": ["main", "master", "develop"],
+  "push": { "enabled": false, "branch_prefix": "wip/yourname/" }
 }
 ```
 
@@ -68,7 +73,7 @@ One entry per local git repository to watch:
 
 Per-repo `schedule` is useful on a shared team config where different
 projects warrant different cadences — e.g. a fast-moving repo checked in
-every 15 minutes, while quieter repos stick to the once-daily default:
+every 15 minutes, while quieter repos stay on the default interval:
 
 ```json
 {
@@ -86,20 +91,22 @@ scheduled job — so repos on different cadences never wait on each other.
 ### `schedule` (object, required)
 
 The default schedule for any repo that doesn't define its own override.
-Either a fixed daily time or a recurring interval:
+Either a recurring interval or a fixed daily time:
+
+**Recurring interval (recommended):**
+```json
+{ "type": "interval", "hours": 0, "minutes": 30 }
+```
+Runs repeatedly every `hours`/`minutes` (both optional, but at least one must
+be non-zero), starting one interval after the scheduler is launched. A short
+interval keeps the off-machine backup close to your latest work — a
+once-a-day run can still lose most of a day if the disk fails at 5pm.
 
 **Fixed daily time:**
 ```json
 { "type": "cron", "hour": 18, "minute": 0 }
 ```
 Runs once a day at the given hour/minute (24-hour, local time).
-
-**Recurring interval:**
-```json
-{ "type": "interval", "hours": 1, "minutes": 30 }
-```
-Runs repeatedly every `hours`/`minutes` (both optional, but at least one must
-be non-zero), starting one interval after the scheduler is launched.
 
 ### `commit_message_template` (string, optional)
 
@@ -127,6 +134,56 @@ branches instead of landing WIP commits directly on shared branches.
 Override per repo if a project uses different branch names for its main
 line (e.g. `["main", "release"]`), or to widen/narrow the list for a
 specific repo.
+
+### `push` (object, optional)
+
+Default: `{ "enabled": false }` — the tool commits locally only.
+
+A local commit does not survive the machine it's on. Enable `push` so that
+every auto check-in (and any unpushed manual commits) is mirrored to the
+remote, giving committed work an off-machine copy:
+
+```json
+{
+  "push": {
+    "enabled": true,
+    "remote": "origin",
+    "branch_prefix": "wip/fidha/"
+  }
+}
+```
+
+| Field           | Required        | Description                                                                                      |
+|-----------------|-----------------|--------------------------------------------------------------------------------------------------|
+| `enabled`       | yes (to opt in) | `true` turns on auto-push.                                                                       |
+| `branch_prefix` | yes when enabled| Namespace for the WIP branch, e.g. `"wip/fidha/"`. Use your own name so each dev's branch is distinct. |
+| `remote`        | no              | Remote to push to. Default `"origin"`.                                                          |
+
+When enabled, after each pass the tool runs, for the repo's current branch
+`<branch>`:
+
+```
+git push --force-with-lease <remote> HEAD:refs/heads/<branch_prefix><branch>
+```
+
+So on branch `feature/login` with prefix `wip/fidha/`, HEAD is mirrored to
+`wip/fidha/feature/login` on the remote. Key properties:
+
+- **The real feature branch is never pushed** — only the `wip/<name>/…`
+  copy. Shared branches stay clean; teammates never see your WIP.
+- Runs **even when nothing was committed this pass**, so manual commits you
+  haven't pushed yet are backed up too.
+- A pre-check (`git ls-remote`) **skips the push** when the WIP branch
+  already points at HEAD.
+- Push failures (offline, missing credentials, branch advanced elsewhere)
+  are **non-fatal** — logged and retried on the next scheduled pass. The
+  local commit is already safe regardless.
+- Runs with `GIT_TERMINAL_PROMPT=0` so an unattended run fails fast instead
+  of hanging on a credential prompt — the machine must have working git
+  credentials for `remote` (credential manager, SSH key, or token).
+
+Override per repo with a repo-level `push` block (e.g. to disable it for one
+repo, or point a repo at a different remote).
 
 ## Testing with `--once`
 
@@ -247,5 +304,8 @@ surface half-finished work. That's why `protected_branches` is enabled by
 default (see above) — the tool refuses to auto-commit on `main`, `master`,
 or `develop`, so it only acts on feature/working branches unless you
 explicitly reconfigure it. Squash or rebase before merging if you want a
-clean history upstream. Remember: this tool never pushes, so noisy local
-commits stay local until you decide otherwise.
+clean history upstream. With `push` disabled (the default) these noisy
+commits stay local; with `push` enabled they are mirrored only to your
+`wip/<name>/…` branch, never to the real feature branch others pull from.
+
+<!-- branch-guard test note -->
