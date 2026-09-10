@@ -161,13 +161,34 @@ def get_status_porcelain(repo_path: Path) -> str:
     return result.stdout
 
 
+def filter_exclude_patterns(repo_path: Path, exclude_patterns: list) -> list:
+    """Drop exclude patterns that name a path git already ignores.
+
+    A `:(exclude)<path>` pathspec that points at an existing, gitignored path
+    makes `git add` abort with "paths are ignored ... use -f" and stage
+    nothing. Such an exclude is redundant anyway -- `git add -A` never stages
+    ignored files -- so we simply leave those patterns out of the pathspec.
+    Glob patterns (e.g. `*.log`) and paths that don't exist are kept as-is.
+    """
+    kept = []
+    for pattern in exclude_patterns:
+        candidate = pattern.rstrip("/")
+        if (repo_path / candidate).exists():
+            check = run_git(["check-ignore", "-q", candidate], cwd=repo_path)
+            if check.returncode == 0:
+                continue  # already ignored by git; excluding it breaks `git add`
+        kept.append(pattern)
+    return kept
+
+
 def stage_changes(repo_path: Path, exclude_patterns: list) -> None:
     """Stage all changes with `git add -A`, honoring exclude_patterns via pathspecs."""
     args = ["add", "-A"]
-    if exclude_patterns:
+    effective_excludes = filter_exclude_patterns(repo_path, exclude_patterns)
+    if effective_excludes:
         args.append("--")
         args.append(".")
-        for pattern in exclude_patterns:
+        for pattern in effective_excludes:
             args.append(f":(exclude){pattern}")
     result = run_git(args, cwd=repo_path)
     if result.returncode != 0:
