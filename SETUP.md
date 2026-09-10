@@ -6,6 +6,8 @@ copy to a personal `wip/<you>/<branch>` branch — it never touches `main` or
 your real feature branch, and it never `git push`es your feature branch for
 you.
 
+> **On Windows?** Follow the step-by-step [Windows setup guide](docs/windows-setup.md).
+
 ## Quick start
 
 **Requirements:** Python 3.8+, git, and `git push` that works without
