@@ -22,7 +22,19 @@ only used, optionally, to auto-start the script on login — see below).
 
 ## Install
 
-Requires Python 3.8+.
+Requires Python 3.8+ and git.
+
+**Fastest path — the interactive installer** (installs the dependency, writes
+your config, registers the login autostart, runs a verification pass):
+
+```bash
+python install.py            # set up / reconfigure this machine
+python install.py --uninstall # remove the login autostart entry
+```
+
+See [SETUP.md](SETUP.md) for the step-by-step developer guide.
+
+**Manual install:**
 
 ```bash
 pip install -r requirements.txt
@@ -35,6 +47,7 @@ By default the tool looks for `config.json` next to `auto_checkin.py`. Use
 
 ```json
 {
+  "scan_directories": ["C:/Users/you/projects"],
   "repositories": [
     {
       "name": "example-project",
@@ -59,7 +72,25 @@ By default the tool looks for `config.json` next to `auto_checkin.py`. Use
 }
 ```
 
-### `repositories` (array, required)
+### `scan_directories` (array, optional)
+
+A list of folders to auto-discover git repos in. Each run, the tool looks at
+every folder listed here and its immediate subdirectories, and watches any
+that is a git repo — using the folder name as the repo `name` and inheriting
+all top-level settings (`schedule`, `push`, `protected_branches`, …).
+
+```json
+"scan_directories": ["C:/Users/you/projects"]
+```
+
+Point this at the folder that holds your projects and you never have to edit
+the config again when you clone a new repo into it. A repo whose path also
+appears in `repositories` keeps the explicit entry (so per-repo overrides
+still win).
+
+At least one of `scan_directories` or `repositories` must resolve to a repo.
+
+### `repositories` (array, required unless `scan_directories` is set)
 
 One entry per local git repository to watch:
 

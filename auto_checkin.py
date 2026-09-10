@@ -80,6 +80,31 @@ def validate_push(push, context: str) -> None:
         raise ConfigError(f"{context}: 'remote' must be a non-empty string.")
 
 
+def discover_repositories(scan_directories: list, already_listed: set) -> list:
+    """Find git repositories under each path in 'scan_directories'.
+
+    A path counts if it is itself a git repo, or if any of its immediate
+    subdirectories is. This lets a developer point the tool at the folder
+    that holds all their projects (e.g. "D:/work") and never touch the
+    config again when they clone another repo into it. Repos whose path is
+    already in the explicit 'repositories' list are skipped so per-repo
+    overrides there still win.
+    """
+    discovered = []
+    for raw in scan_directories:
+        base = Path(raw).expanduser()
+        if not base.is_dir():
+            continue
+        candidates = [base] + sorted(p for p in base.iterdir() if p.is_dir())
+        for path in candidates:
+            resolved = str(path.resolve())
+            if resolved in already_listed or not is_git_repo(path):
+                continue
+            already_listed.add(resolved)
+            discovered.append({"name": path.name, "path": resolved})
+    return discovered
+
+
 def load_config(config_path: Path) -> dict:
     """Load and minimally validate the JSON config file."""
     if not config_path.is_file():
@@ -92,8 +117,16 @@ def load_config(config_path: Path) -> dict:
         raise ConfigError(f"Config file is not valid JSON: {exc}") from exc
 
     repositories = config.get("repositories")
-    if not isinstance(repositories, list) or not repositories:
-        raise ConfigError("Config must include a non-empty 'repositories' list.")
+    if repositories is None:
+        repositories = config["repositories"] = []
+    if not isinstance(repositories, list):
+        raise ConfigError("Config 'repositories' must be a list.")
+
+    scan_directories = config.get("scan_directories", [])
+    if not isinstance(scan_directories, list) or not all(
+        isinstance(d, str) for d in scan_directories
+    ):
+        raise ConfigError("Config 'scan_directories' must be a list of paths.")
 
     for i, repo in enumerate(repositories):
         if "name" not in repo or "path" not in repo:
@@ -114,6 +147,16 @@ def load_config(config_path: Path) -> dict:
     validate_schedule(config.get("schedule"), "Top-level 'schedule'")
     if "push" in config:
         validate_push(config["push"], "Top-level 'push'")
+
+    if scan_directories:
+        listed_paths = {str(Path(r["path"]).expanduser().resolve()) for r in repositories}
+        repositories.extend(discover_repositories(scan_directories, listed_paths))
+
+    if not repositories:
+        raise ConfigError(
+            "No repositories to watch: 'repositories' is empty and "
+            "'scan_directories' found no git repos."
+        )
 
     config.setdefault(
         "commit_message_template", "Automated check-in: {name} at {timestamp}"
